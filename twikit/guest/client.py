@@ -183,10 +183,9 @@ class GuestClient:
         """
         Activate the client by generating a guest token.
         """
-        if self._guest_token is not None:
-            return self._guest_token
         response, _ = await self.v11.guest_activate()
         self._guest_token = response['guest_token']
+        return self._guest_token
 
     async def get_user_by_screen_name(self, screen_name: str) -> User:
         """

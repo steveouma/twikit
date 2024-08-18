@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import io
 import json
+import re
 import warnings
 from functools import partial
 from typing import Any, AsyncGenerator, Literal
@@ -16,24 +17,12 @@ from .._captcha import Capsolver
 from ..bookmark import BookmarkFolder
 from ..community import Community, CommunityMember
 from ..constants import TOKEN
-from ..errors import (
-    AccountLocked,
-    AccountSuspended,
-    BadRequest,
-    CouldNotTweet,
-    Forbidden,
-    InvalidMedia,
-    NotFound,
-    RequestTimeout,
-    ServerError,
-    TooManyRequests,
-    TweetNotAvailable,
-    TwitterException,
-    Unauthorized,
-    UserNotFound,
-    UserUnavailable,
-    raise_exceptions_from_response
-)
+from ..errors import (AccountLocked, AccountSuspended, BadRequest,
+                      CouldNotTweet, Forbidden, InvalidMedia, NotFound,
+                      RequestTimeout, ServerError, TooManyRequests,
+                      TweetNotAvailable, TwitterException, Unauthorized,
+                      UserNotFound, UserUnavailable,
+                      raise_exceptions_from_response)
 from ..geo import Place, _places_from_response
 from ..group import Group, GroupMessage
 from ..list import List
@@ -43,7 +32,8 @@ from ..streaming import Payload, StreamingSession, _payload_from_data
 from ..trend import Location, PlaceTrend, PlaceTrends, Trend
 from ..tweet import CommunityNote, Poll, ScheduledTweet, Tweet, tweet_from_data
 from ..user import User
-from ..utils import Flow, Result, build_tweet_data, build_user_data, find_dict, find_entry_by_type, httpx_transport_to_url
+from ..utils import (Flow, Result, build_tweet_data, build_user_data,
+                     find_dict, find_entry_by_type, httpx_transport_to_url)
 from .gql import GQLClient
 from .v11 import V11Client
 
@@ -80,6 +70,7 @@ class Client:
         language: str | None = None,
         proxy: str | None = None,
         captcha_solver: Capsolver | None = None,
+        user_agent: str | None = None,
         **kwargs
     ) -> None:
         if 'proxies' in kwargs:
@@ -98,9 +89,7 @@ class Client:
 
         self._token = TOKEN
         self._user_id = None
-        self._user_agent = ('Mozilla/5.0 (Windows NT 10.0; Win64; x64) '
-                            'AppleWebKit/537.36 (KHTML, like Gecko) '
-                            'Chrome/122.0.0.0 Safari/537.36')
+        self._user_agent = user_agent or 'Mozilla/5.0 (Macintosh; Intel Mac OS X 14_6_1) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Safari/605.1.15'
         self._act_as = None
 
         self.gql = GQLClient(self)
@@ -192,9 +181,7 @@ class Client:
     @property
     def proxy(self) -> str:
         ':meta private:'
-        transport: AsyncHTTPTransport = self.http._mounts.get(
-            URLPattern('all://')
-        )
+        transport: AsyncHTTPTransport = self.http._mounts.get(URLPattern('all://'))
         if transport is None:
             return None
         if not hasattr(transport._pool, '_proxy_url'):
@@ -203,9 +190,7 @@ class Client:
 
     @proxy.setter
     def proxy(self, url: str) -> None:
-        self.http._mounts = {
-            URLPattern('all://'): AsyncHTTPTransport(proxy=url)
-        }
+        self.http._mounts = {URLPattern('all://'): AsyncHTTPTransport(proxy=url)}
 
     def _get_csrf_token(self) -> str:
         """
@@ -248,6 +233,10 @@ class Client:
         response, _ = await self.v11.guest_activate()
         guest_token = response['guest_token']
         return guest_token
+
+    async def _ui_metrix(self) -> str:
+        js, _ = await self.get('https://twitter.com/i/js_inst?c_name=ui_metrics')
+        return re.findall(r'return ({.*?});', js, re.DOTALL)[0]
 
     async def login(
         self,
@@ -293,8 +282,67 @@ class Client:
 
         flow = Flow(self, guest_token)
 
-        await flow.execute_task(params={'flow_name': 'login'})
-        await flow.execute_task()
+        await flow.execute_task(params={'flow_name': 'login'}, data={
+            'input_flow_data': {
+                'flow_context': {
+                    'debug_overrides': {},
+                    'start_location': {
+                        'location': 'splash_screen'
+                    }
+                }
+            },
+            'subtask_versions': {
+                'action_list': 2,
+                'alert_dialog': 1,
+                'app_download_cta': 1,
+                'check_logged_in_account': 1,
+                'choice_selection': 3,
+                'contacts_live_sync_permission_prompt': 0,
+                'cta': 7,
+                'email_verification': 2,
+                'end_flow': 1,
+                'enter_date': 1,
+                'enter_email': 2,
+                'enter_password': 5,
+                'enter_phone': 2,
+                'enter_recaptcha': 1,
+                'enter_text': 5,
+                'enter_username': 2,
+                'generic_urt': 3,
+                'in_app_notification': 1,
+                'interest_picker': 3,
+                'js_instrumentation': 1,
+                'menu_dialog': 1,
+                'notifications_permission_prompt': 2,
+                'open_account': 2,
+                'open_home_timeline': 1,
+                'open_link': 1,
+                'phone_verification': 4,
+                'privacy_options': 1,
+                'security_key': 3,
+                'select_avatar': 4,
+                'select_banner': 2,
+                'settings_list': 7,
+                'show_code': 1,
+                'sign_up': 2,
+                'sign_up_review': 4,
+                'tweet_selection_urt': 1,
+                'update_users': 1,
+                'upload_media': 1,
+                'user_recommendations_list': 4,
+                'user_recommendations_urt': 1,
+                'wait_spinner': 3,
+                'web_modal': 1
+            }
+        })
+        await flow.sso_init('apple')
+        await flow.execute_task({
+            "subtask_id": "LoginJsInstrumentationSubtask",
+            "js_instrumentation": {
+                "response": await self._ui_metrix(),
+                "link": "next_link"
+            }
+        })
         await flow.execute_task({
             'subtask_id': 'LoginEnterUserIdentifierSSO',
             'settings_list': {
@@ -340,7 +388,7 @@ class Client:
         if not flow.response['subtasks']:
             return
 
-        self._user_id = find_dict(flow.response, 'id_str', find_one=True)[0]
+        self._user_id = flow.response['subtasks'][0]['open_account']['user']['id_str']
 
         if flow.task_id == 'LoginTwoFactorAuthChallenge':
             if totp_secret is None:
@@ -919,9 +967,7 @@ class Client:
         while bytes_sent < total_bytes:
             chunk = binary[bytes_sent:bytes_sent + MAX_SEGMENT_SIZE]
             chunk_stream = io.BytesIO(chunk)
-            coro = self.v11.upload_media_append(
-                is_long_video, media_id, segment_index, chunk_stream
-            )
+            coro = self.v11.upload_media_append(is_long_video, media_id, segment_index, chunk_stream)
             append_tasks.append(asyncio.create_task(coro))
             chunk_streams.append(chunk_stream)
 
@@ -1064,8 +1110,7 @@ class Client:
         :class:`Poll`
             The Poll object representing the updated poll after voting.
         """
-        response, _ = await self.v11.vote(selected_choice, card_uri,
-                                          tweet_id, card_name)
+        response, _ = await self.v11.vote(selected_choice, card_uri, tweet_id, card_name)
         card_data = {
             'rest_id': response['card']['url'],
             'legacy': response['card']
@@ -1174,16 +1219,13 @@ class Client:
             reply_to, attachment_url, community_id, share_with_followers,
             richtext_options, edit_tweet_id, limit_mode
         )
-        _result = find_dict(response, 'result', find_one=True)
+        _result = response['data']['create_tweet']['tweet_results']
         if not _result:
             raise_exceptions_from_response(response['errors'])
             raise CouldNotTweet(
                 response['errors'][0] if response['errors'] else 'Failed to post a tweet.'
             )
-
-        tweet_info = _result[0]
-        user_info = tweet_info['core']['user_results']['result']
-        return Tweet(self, tweet_info, User(self, user_info))
+        return tweet_from_data(self, _result)
 
     async def create_scheduled_tweet(
         self,
@@ -2539,9 +2581,6 @@ class Client:
         count: int, f, cursor: str
     ) -> Result[User]:
         response, _ = await f(user_id, screen_name, count, cursor)
-        from jlog import log
-        log(response)
-
         users = response['users']
         results = []
         for user in users:
